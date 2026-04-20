@@ -1,0 +1,12 @@
+node_modules/
+desktop-client/__pycache__/
+desktop-client/.venv/
+desktop-client/build/
+desktop-client/dist/
+desktop-client/*.spec
+desktop-client/installer/ExamHelperClientSetup.exe
+backend/uploads/
+backend/server.log
+*.pyc
+.env
+backend/.env

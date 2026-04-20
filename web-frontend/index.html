@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ExamHelper Screenshot Desk</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="background-orbit orbit-a"></div>
+    <div class="background-orbit orbit-b"></div>
+    
+    <nav class="top-nav">
+      <div class="nav-brand">
+        <i class="ph-fill ph-camera"></i>
+        <span>ExamHelper</span>
+      </div>
+      <div class="nav-actions">
+        <span id="status-pill" class="status-pill">Loading screenshots...</span>
+      </div>
+    </nav>
+
+    <div class="page-shell">
+      <main class="workspace">
+        <section class="panel board-panel">
+          <div class="toolbar">
+            <div class="toolbar-group">
+              <span id="screenshot-count" class="toolbar-label">0</span>
+              <span id="selection-count" class="toolbar-label">0</span>
+            </div>
+            
+            <div class="toolbar-group prompt-options" id="prompt-list">
+              <!-- Prompts injected here via JS -->
+            </div>
+
+            <div class="toolbar-group toolbar-actions">
+              <button id="select-all-btn" class="button button-secondary icon-btn" type="button" title="Select All"><i class="ph ph-check-square"></i></button>
+              <button id="clear-selection-btn" class="button button-ghost icon-btn" type="button" title="Clear Selection"><i class="ph ph-x"></i></button>
+            </div>
+          </div>
+
+          <div class="bulk-bar">
+            <button id="copy-selected-btn" class="button button-secondary" type="button" title="Copy Selected"><i class="ph ph-copy"></i> Copy</button>
+            <button id="extract-selected-btn" class="button button-primary" type="button" title="Extract Text to Clipboard"><i class="ph ph-sparkle"></i> Extract</button>
+            <button id="delete-selected-btn" class="button button-danger icon-btn" type="button" title="Delete Selected"><i class="ph ph-trash"></i></button>
+          </div>
+
+          <div id="screenshots-container" class="screenshots-container" aria-live="polite"></div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

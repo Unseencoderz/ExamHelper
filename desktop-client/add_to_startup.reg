@@ -1,0 +1,7 @@
+Windows Registry Editor Version 5.00
+
+; ExamHelper desktop client startup example.
+; Update both paths below before importing this file.
+
+[HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run]
+"ExamHelperScreenshotClient"="\"C:\\Path\\To\\pythonw.exe\" \"C:\\Path\\To\\ExamHelper\\desktop-client\\screenshot_client.py\""
