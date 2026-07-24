@@ -1,12 +1,12 @@
 @echo off
 setlocal
-title ExamHelper Desktop Client
+title Microphone
 
 pushd "%~dp0"
 
 echo.
 echo ==========================================
-echo   ExamHelper Desktop Client
+echo   Microphone
 echo ==========================================
 echo.
 

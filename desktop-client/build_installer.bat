@@ -1,6 +1,6 @@
 @echo off
 setlocal
-title Build ExamHelper Installer
+title Build Microphone Installer
 
 pushd "%~dp0"
 
@@ -17,13 +17,13 @@ if not exist "%ISCC_PATH%" (
 )
 
 echo [INFO] Building installer...
-"%ISCC_PATH%" "%~dp0installer\ExamHelperClient.iss"
+"%ISCC_PATH%" "%~dp0installer\Microphone.iss"
 if errorlevel 1 (
     echo [ERROR] Installer build failed.
     exit /b 1
 )
 
-echo [INFO] Installer ready: %~dp0installer\ExamHelperClientSetup.exe
+echo [INFO] Installer ready: %~dp0installer\MicrophoneSetup.exe
 
 popd
 exit /b 0

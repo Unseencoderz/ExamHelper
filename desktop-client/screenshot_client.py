@@ -16,10 +16,10 @@ import threading
 import datetime
 import configparser
 from pathlib import Path
+from ctypes import wintypes
 
 import requests
 from PIL import ImageGrab, Image
-import keyboard
 import pystray
 from pystray import MenuItem as item
 from PIL import Image as PILImage
@@ -27,6 +27,7 @@ from PIL import Image as PILImage
 # ─── Logging Setup ────────────────────────────────────────────────────────────
 LOG_DIR = Path.home() / "AppData" / "Local" / "ScreenshotSync"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+CONFIG_PATH = LOG_DIR / "config.ini"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,7 +50,7 @@ DEFAULT_CONFIG = {
         "profile": "max_quality_v1",
     },
     "upload": {
-        "endpoint": "http://localhost:3000/upload",
+        "endpoint": "https://examhelper-6yn5.onrender.com/upload",
         "device_id": str(uuid.uuid4()),
         "max_queue_size": "100",
         "max_retries": "5",
@@ -63,15 +64,20 @@ DEFAULT_CONFIG = {
 }
 
 
-def upgrade_capture_quality(cfg: configparser.ConfigParser) -> bool:
+def upgrade_capture_quality(
+    cfg: configparser.ConfigParser,
+    raw_profile: str | None,
+    raw_format: str | None,
+    raw_quality: str | None,
+) -> bool:
     """One-time migration that moves existing clients to the highest-quality capture profile."""
     target_profile = DEFAULT_CONFIG["capture"]["profile"]
-    current_profile = cfg.get("capture", "profile", fallback="")
+    current_profile = (raw_profile or "").strip()
     if current_profile == target_profile:
         return False
 
-    current_format = cfg.get("capture", "format", fallback="jpeg").strip().lower()
-    current_quality = cfg.get("capture", "quality", fallback="85").strip()
+    current_format = (raw_format or cfg.get("capture", "format", fallback="jpeg")).strip().lower()
+    current_quality = (raw_quality or cfg.get("capture", "quality", fallback="85")).strip()
 
     # This migration intentionally upgrades legacy lossy defaults to lossless PNG.
     if current_format in {"jpeg", "jpg", "png"}:
@@ -93,25 +99,53 @@ def upgrade_capture_quality(cfg: configparser.ConfigParser) -> bool:
     return True
 
 
+def upgrade_upload_endpoint(cfg: configparser.ConfigParser) -> bool:
+    """One-time migration that updates localhost endpoints to the production default."""
+    target_endpoint = DEFAULT_CONFIG["upload"]["endpoint"]
+    current_endpoint = cfg.get("upload", "endpoint", fallback="")
+    if current_endpoint != target_endpoint and ("localhost" in current_endpoint or "127.0.0.1" in current_endpoint):
+        cfg.set("upload", "endpoint", target_endpoint)
+        log.info(f"Upload endpoint upgraded to {target_endpoint}")
+        return True
+    return False
+
+
 def load_config() -> configparser.ConfigParser:
-    cfg_path = LOG_DIR / "config.ini"
+    raw_cfg = configparser.ConfigParser()
+    if CONFIG_PATH.exists():
+        raw_cfg.read(CONFIG_PATH)
+
     cfg = configparser.ConfigParser()
     cfg.read_dict(DEFAULT_CONFIG)
     changed = False
-    if cfg_path.exists():
-        cfg.read(cfg_path)
+    if CONFIG_PATH.exists():
+        cfg.read(CONFIG_PATH)
     else:
         changed = True
-        log.info(f"Default config prepared for {cfg_path}")
+        log.info(f"Default config prepared for {CONFIG_PATH}")
 
-    if upgrade_capture_quality(cfg):
+    if upgrade_capture_quality(
+        cfg,
+        raw_cfg.get("capture", "profile", fallback=None),
+        raw_cfg.get("capture", "format", fallback=None),
+        raw_cfg.get("capture", "quality", fallback=None),
+    ):
+        changed = True
+
+    if upgrade_upload_endpoint(cfg):
         changed = True
 
     if changed:
-        with open(cfg_path, "w") as f:
+        with open(CONFIG_PATH, "w") as f:
             cfg.write(f)
-        log.info(f"Capture config saved to {cfg_path}")
+        log.info(f"Capture config saved to {CONFIG_PATH}")
     return cfg
+
+
+def save_config(cfg: configparser.ConfigParser):
+    with open(CONFIG_PATH, "w") as f:
+        cfg.write(f)
+    log.info(f"Capture config saved to {CONFIG_PATH}")
 
 
 class SingleInstanceGuard:
@@ -127,6 +161,166 @@ class SingleInstanceGuard:
         if self._handle:
             ctypes.windll.kernel32.CloseHandle(self._handle)
             self._handle = None
+
+
+class WindowsHotkeyListener:
+    """Native Windows hotkey registration for packaged background apps."""
+
+    WM_HOTKEY = 0x0312
+    MOD_ALT = 0x0001
+    MOD_CONTROL = 0x0002
+    MOD_SHIFT = 0x0004
+    MOD_WIN = 0x0008
+    VK_MAP = {
+        "backspace": 0x08,
+        "tab": 0x09,
+        "enter": 0x0D,
+        "return": 0x0D,
+        "pause": 0x13,
+        "capslock": 0x14,
+        "esc": 0x1B,
+        "escape": 0x1B,
+        "space": 0x20,
+        "pageup": 0x21,
+        "pagedown": 0x22,
+        "end": 0x23,
+        "home": 0x24,
+        "left": 0x25,
+        "up": 0x26,
+        "right": 0x27,
+        "down": 0x28,
+        "insert": 0x2D,
+        "ins": 0x2D,
+        "delete": 0x2E,
+        "del": 0x2E,
+        "printscreen": 0x2C,
+        "print": 0x2C,
+    }
+    MODIFIER_MAP = {
+        "alt": MOD_ALT,
+        "ctrl": MOD_CONTROL,
+        "control": MOD_CONTROL,
+        "shift": MOD_SHIFT,
+        "win": MOD_WIN,
+        "windows": MOD_WIN,
+        "cmd": MOD_WIN,
+    }
+
+    class MSG(ctypes.Structure):
+        _fields_ = [
+            ("hwnd", wintypes.HWND),
+            ("message", wintypes.UINT),
+            ("wParam", wintypes.WPARAM),
+            ("lParam", wintypes.LPARAM),
+            ("time", wintypes.DWORD),
+            ("pt", wintypes.POINT),
+            ("lPrivate", wintypes.DWORD),
+        ]
+
+    def __init__(self, hotkey: str, callback):
+        self.hotkey = hotkey
+        self.callback = callback
+        self._hotkey_id = 1
+        self._thread = threading.Thread(target=self._run, daemon=True, name="HotkeyListener")
+        self._thread_id = None
+        self._registered = False
+        self._ready = threading.Event()
+        self._stop = threading.Event()
+
+    @classmethod
+    def _normalize_hotkey(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        replacements = {
+            "print screen": "printscreen",
+            "page up": "pageup",
+            "page down": "pagedown",
+        }
+        for before, after in replacements.items():
+            normalized = normalized.replace(before, after)
+        return normalized
+
+    @classmethod
+    def parse(cls, hotkey: str) -> tuple[int, int]:
+        normalized = cls._normalize_hotkey(hotkey)
+        tokens = [token.strip().replace(" ", "") for token in normalized.split("+") if token.strip()]
+        if not tokens:
+            raise ValueError("Hotkey is empty.")
+
+        modifiers = 0
+        main_key = None
+        for token in tokens:
+            if token in cls.MODIFIER_MAP:
+                modifiers |= cls.MODIFIER_MAP[token]
+                continue
+
+            if token.startswith("f") and token[1:].isdigit():
+                key_number = int(token[1:])
+                if 1 <= key_number <= 24:
+                    key_code = 0x70 + key_number - 1
+                else:
+                    raise ValueError(f"Unsupported function key: {token}")
+            elif token in cls.VK_MAP:
+                key_code = cls.VK_MAP[token]
+            elif len(token) == 1:
+                key_code = ord(token.upper())
+            else:
+                raise ValueError(f"Unsupported hotkey token: {token}")
+
+            if main_key is not None:
+                raise ValueError("Hotkey must contain exactly one non-modifier key.")
+            main_key = key_code
+
+        if main_key is None:
+            raise ValueError("Hotkey must include a non-modifier key.")
+
+        return modifiers, main_key
+
+    def start(self) -> bool:
+        self._thread.start()
+        self._ready.wait(timeout=2)
+        return self._registered
+
+    def stop(self):
+        self._stop.set()
+        if self._thread_id:
+            ctypes.windll.user32.PostThreadMessageW(self._thread_id, 0x0012, 0, 0)
+        if self._thread.is_alive():
+            self._thread.join(timeout=2)
+
+    def _run(self):
+        self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
+        try:
+            modifiers, virtual_key = self.parse(self.hotkey)
+        except ValueError as error:
+            log.error(f"Hotkey configuration is invalid: {error}")
+            self._ready.set()
+            return
+
+        if not ctypes.windll.user32.RegisterHotKey(None, self._hotkey_id, modifiers, virtual_key):
+            error_code = ctypes.windll.kernel32.GetLastError()
+            log.error(f"Failed to register global hotkey {self.hotkey} (Win32 error {error_code})")
+            self._ready.set()
+            return
+
+        self._registered = True
+        log.info(f"Registered global hotkey: {self.hotkey}")
+        self._ready.set()
+
+        message = self.MSG()
+        while not self._stop.is_set():
+            result = ctypes.windll.user32.GetMessageW(ctypes.byref(message), None, 0, 0)
+            if result <= 0:
+                break
+
+            if message.message == self.WM_HOTKEY and message.wParam == self._hotkey_id:
+                try:
+                    self.callback()
+                except Exception as error:
+                    log.error(f"Hotkey callback failed: {error}")
+
+        if self._registered:
+            ctypes.windll.user32.UnregisterHotKey(None, self._hotkey_id)
+            self._registered = False
 
 
 # ─── Queue Manager ────────────────────────────────────────────────────────────
@@ -325,16 +519,17 @@ class Uploader:
 
 # ─── System Tray Icon ─────────────────────────────────────────────────────────
 def make_tray_icon(app: "ScreenshotSyncApp"):
-    """Create a simple colored icon for the system tray."""
+    """Create a simple microphone icon for the system tray."""
     size = 64
     img = PILImage.new("RGBA", (size, size), (0, 0, 0, 0))
     from PIL import ImageDraw
     draw = ImageDraw.Draw(img)
-    # Draw a camera-like icon
-    draw.rectangle([8, 18, 56, 50], fill=(41, 128, 185), outline=(255,255,255), width=2)
-    draw.ellipse([22, 24, 42, 44], fill=(255, 255, 255))
-    draw.ellipse([28, 30, 36, 38], fill=(41, 128, 185))
-    draw.rectangle([38, 14, 48, 20], fill=(41, 128, 185), outline=(255,255,255), width=1)
+    draw.rounded_rectangle([23, 8, 41, 38], radius=9, fill=(38, 118, 181), outline=(255, 255, 255), width=2)
+    draw.arc([15, 24, 49, 52], start=0, end=180, fill=(255, 255, 255), width=4)
+    draw.line([32, 50, 32, 58], fill=(255, 255, 255), width=4)
+    draw.line([23, 58, 41, 58], fill=(255, 255, 255), width=4)
+    draw.line([30, 14, 34, 14], fill=(255, 255, 255), width=2)
+    draw.line([30, 21, 34, 21], fill=(255, 255, 255), width=2)
     return img
 
 
@@ -354,26 +549,37 @@ class ScreenshotSyncApp:
         self._capture_lock = threading.Lock()
         self._last_hotkey_at = 0.0
         self._tray = None
+        self._hotkey_listener = WindowsHotkeyListener(self.hotkey, self.on_hotkey)
 
     def on_hotkey(self):
+        self._request_capture("hotkey", enforce_cooldown=True)
+
+    def _request_capture(self, source: str, enforce_cooldown: bool):
         now = time.monotonic()
         should_start = False
 
         with self._capture_lock:
             if self._capturing:
-                log.info("Ignoring hotkey because a capture is already in progress")
+                log.info(f"Ignoring {source} trigger because a capture is already in progress")
                 return
 
-            if now - self._last_hotkey_at < self.hotkey_cooldown:
-                log.info("Ignoring duplicate hotkey trigger inside cooldown window")
+            if enforce_cooldown and now - self._last_hotkey_at < self.hotkey_cooldown:
+                log.info(f"Ignoring duplicate {source} trigger inside cooldown window")
                 return
 
             self._capturing = True
-            self._last_hotkey_at = now
+            if enforce_cooldown:
+                self._last_hotkey_at = now
             should_start = True
 
         if should_start:
-            threading.Thread(target=self._do_capture, daemon=True, name="CaptureWorker").start()
+            log.info(f"Accepted {source} capture request")
+            threading.Thread(
+                target=self._do_capture,
+                args=(source,),
+                daemon=True,
+                name="CaptureWorker",
+            ).start()
 
     def _capture_with_retry(self) -> list[tuple[bytes, str]]:
         shots = self.capture.capture()
@@ -384,12 +590,15 @@ class ScreenshotSyncApp:
         time.sleep(self.empty_capture_retry_delay)
         return self.capture.capture()
 
-    def _do_capture(self):
+    def _do_capture(self, source: str):
         try:
             start = time.perf_counter()
+            log.info(f"Starting screenshot capture from {source}")
             shots = self._capture_with_retry()
             if not shots:
-                log.warning("No screenshots were captured after retry; nothing will be enqueued")
+                log.warning(
+                    f"No screenshots were captured after retry for {source}; nothing will be enqueued"
+                )
                 return
 
             fmt = self.cfg.get("capture", "format")
@@ -405,46 +614,106 @@ class ScreenshotSyncApp:
                 self.pq.enqueue(image_bytes, meta)
 
             elapsed = (time.perf_counter() - start) * 1000
-            log.info(f"Captured {len(shots)} screenshot(s) in {elapsed:.1f}ms")
+            log.info(f"Captured {len(shots)} screenshot(s) from {source} in {elapsed:.1f}ms")
         except Exception as e:
             log.error(f"Capture error: {e}")
         finally:
             with self._capture_lock:
                 self._capturing = False
 
+    def _tray_capture_now(self, icon, item):
+        self._request_capture("tray", enforce_cooldown=False)
+
     def _tray_quit(self, icon, item):
         log.info("Shutting down via tray")
         self.uploader.stop()
-        keyboard.unhook_all()
+        self._hotkey_listener.stop()
         icon.stop()
 
     def _tray_status(self, icon, item):
         size = self.pq.size()
         log.info(f"Queue size: {size}")
 
-    def run(self):
-        log.info(f"ScreenshotSync starting — hotkey: {self.hotkey}")
-        keyboard.add_hotkey(self.hotkey, self.on_hotkey, suppress=False, trigger_on_release=True)
-        self.uploader.start()
-
-        icon_img = make_tray_icon(self)
-        menu = pystray.Menu(
-            item("Screenshot Sync — Running", lambda i, m: None, enabled=False),
+    def _make_menu(self):
+        return pystray.Menu(
+            item("Microphone — Running", lambda i, m: None, enabled=False),
             item(f"Hotkey: {self.hotkey}", lambda i, m: None, enabled=False),
             pystray.Menu.SEPARATOR,
+            item("Open Config", self._tray_open_config),
+            item("Reload Hotkey", self._tray_reload_hotkey),
+            item("Capture Now", self._tray_capture_now),
             item("Check Queue Size", self._tray_status),
             item("Quit", self._tray_quit),
         )
-        self._tray = pystray.Icon("ScreenshotSync", icon_img, "Screenshot Sync", menu)
+
+    def _tray_open_config(self, icon, item):
+        try:
+            os.startfile(CONFIG_PATH)
+        except Exception as error:
+            log.error(f"Could not open config file: {error}")
+
+    def _tray_reload_hotkey(self, icon, item):
+        cfg = configparser.ConfigParser()
+        cfg.read_dict(DEFAULT_CONFIG)
+        cfg.read(CONFIG_PATH)
+        new_hotkey = cfg.get("capture", "hotkey", fallback=self.hotkey).strip()
+        if not new_hotkey or new_hotkey == self.hotkey:
+            return
+        if self._set_hotkey(new_hotkey):
+            self.cfg = cfg
+
+    def _set_hotkey(self, new_hotkey: str) -> bool:
+        try:
+            WindowsHotkeyListener.parse(new_hotkey)
+        except ValueError as error:
+            log.error(f"Hotkey configuration is invalid: {error}")
+            return False
+
+        previous_hotkey = self.hotkey
+        previous_listener = self._hotkey_listener
+        previous_listener.stop()
+
+        replacement = WindowsHotkeyListener(new_hotkey, self.on_hotkey)
+        if not replacement.start():
+            log.error(f"Could not register updated hotkey: {new_hotkey}")
+            self._hotkey_listener = WindowsHotkeyListener(previous_hotkey, self.on_hotkey)
+            self._hotkey_listener.start()
+            return False
+
+        self.hotkey = new_hotkey
+        self._hotkey_listener = replacement
+        self.cfg.set("capture", "hotkey", new_hotkey)
+        save_config(self.cfg)
+        if self._tray:
+            self._tray.menu = self._make_menu()
+            self._tray.update_menu()
+        return True
+
+    def run(self):
+        log.info(f"ScreenshotSync starting — hotkey: {self.hotkey}")
+        log.info(
+            f"Capture format={self.cfg.get('capture', 'format')} "
+            f"endpoint={self.cfg.get('upload', 'endpoint')}"
+        )
+        hotkey_registered = self._hotkey_listener.start()
+        if not hotkey_registered:
+            log.error(
+                "Global hotkey registration failed. Use the tray menu's Capture Now action "
+                "to verify capture and keep the app running."
+            )
+        self.uploader.start()
+
+        icon_img = make_tray_icon(self)
+        self._tray = pystray.Icon("Microphone", icon_img, "Microphone", self._make_menu())
         log.info("System tray icon created — running in background")
         self._tray.run()
 
 
 # ─── Entry Point ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    instance_guard = SingleInstanceGuard("Local\\ExamHelperScreenshotClient")
+    instance_guard = SingleInstanceGuard("Local\\Microphone")
     if instance_guard.already_running:
-        log.warning("Another ExamHelper screenshot client instance is already running; exiting.")
+        log.warning("Another Microphone instance is already running; exiting.")
         sys.exit(0)
 
     app = ScreenshotSyncApp()
