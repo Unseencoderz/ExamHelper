@@ -19,12 +19,14 @@ async function request(url, options = {}) {
 
 export const api = {
   async loadDashboard() {
-    const [screenshots, stats] = await Promise.all([
+    const [screenshots, stats, snippets, config] = await Promise.all([
       request("/screenshots?limit=100"),
       request("/stats"),
+      request("/snippets"),
+      request("/config"),
     ]);
 
-    return { screenshots, stats };
+    return { screenshots, stats, snippets, config };
   },
 
   async deleteScreenshot(id) {
@@ -51,6 +53,33 @@ export const api = {
     return request("/extract-text", {
       method: "POST",
       body: JSON.stringify({ ids }),
+    });
+  },
+
+  async createSnippet(snippet) {
+    return request("/snippets", {
+      method: "POST",
+      body: JSON.stringify(snippet),
+    });
+  },
+
+  async updateSnippet(id, snippet) {
+    return request(`/snippets/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(snippet),
+    });
+  },
+
+  async deleteSnippet(id) {
+    return request(`/snippets/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+  },
+
+  async updateConfig(config) {
+    return request("/config", {
+      method: "PATCH",
+      body: JSON.stringify(config),
     });
   },
 };

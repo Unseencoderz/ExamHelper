@@ -38,6 +38,10 @@ body {
     radial-gradient(ellipse at bottom right, rgba(6, 182, 212, 0.1), transparent 40%);
 }
 
+body.modal-open {
+  overflow: hidden;
+}
+
 button, input, textarea {
   font: inherit;
 }
@@ -106,6 +110,36 @@ img {
   color: var(--accent);
 }
 
+.nav-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nav-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 14px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+
+.nav-tab:hover,
+.nav-tab.is-active {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  border-color: var(--line);
+}
+
+.nav-tab i {
+  font-size: 1.05rem;
+}
+
 .page-shell {
   position: relative;
   z-index: 1;
@@ -144,6 +178,14 @@ img {
 .board-panel {
   min-width: 0;
   padding: 32px;
+}
+
+.view-panel {
+  display: none;
+}
+
+.view-panel.is-active {
+  display: block;
 }
 
 .panel-heading {
@@ -274,6 +316,116 @@ img {
   font-size: 1.1rem;
 }
 
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.82rem;
+}
+
+.field input,
+.field textarea,
+.field select {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  padding: 10px 12px;
+  outline: none;
+}
+
+.field textarea {
+  resize: vertical;
+  min-height: 132px;
+  line-height: 1.45;
+}
+
+.field input:focus,
+.field textarea:focus,
+.field select:focus {
+  border-color: rgba(139, 92, 246, 0.7);
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.16);
+}
+
+.snippet-form,
+.settings-form {
+  display: grid;
+  gap: 16px;
+  margin-bottom: 28px;
+}
+
+.snippet-form {
+  grid-template-columns: minmax(160px, 240px) minmax(0, 1fr);
+  align-items: end;
+}
+
+.field-text {
+  grid-row: span 2;
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.snippets-list {
+  display: grid;
+  gap: 12px;
+}
+
+.snippet-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: center;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-strong);
+}
+
+.snippet-shortcut {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  margin-bottom: 10px;
+  padding: 4px 9px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.snippet-preview {
+  max-height: 90px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-family: var(--font-body);
+  line-height: 1.45;
+}
+
+.compact-empty {
+  min-height: 220px;
+}
+
+.compact-empty i {
+  font-size: 2.4rem;
+  color: var(--muted);
+  margin-bottom: 14px;
+}
+
 .icon-btn {
   padding: 0;
   width: 38px;
@@ -326,11 +478,39 @@ img {
   max-height: 80vh;
   object-fit: contain;
   opacity: 0.95;
-  transition: opacity 0.3s ease;
+  transition: opacity 0.3s ease, transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .shot-card:hover .shot-preview img {
   opacity: 1;
+  transform: scale(1.01);
+}
+
+.shot-hover-actions {
+  position: absolute;
+  right: 16px;
+  top: 16px;
+  z-index: 3;
+  display: flex;
+  gap: 8px;
+  opacity: 0;
+  transform: translateY(-6px);
+  pointer-events: none;
+  transition: opacity 180ms ease, transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.shot-card:hover .shot-hover-actions,
+.shot-card:focus-within .shot-hover-actions {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.shot-hover-actions .button {
+  background: rgba(0, 0, 0, 0.66);
+  border-color: rgba(255, 255, 255, 0.22);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 
 .select-pill {
@@ -463,6 +643,58 @@ img {
   transform: translateY(0);
 }
 
+.image-modal[hidden] {
+  display: none;
+}
+
+.image-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+}
+
+.image-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.78);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  animation: modal-fade 160ms ease-out both;
+}
+
+.image-modal-panel {
+  position: relative;
+  z-index: 1;
+  max-width: min(96vw, 1400px);
+  max-height: 92vh;
+  animation: modal-rise 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.image-modal-panel img {
+  max-width: 100%;
+  max-height: 92vh;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+  background: #000;
+}
+
+.image-modal-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 2;
+  background: rgba(0, 0, 0, 0.66);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  color: #fff;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
 @keyframes fade-in {
   from {
     opacity: 0;
@@ -474,9 +706,60 @@ img {
   }
 }
 
+@keyframes modal-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes modal-rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 @media (max-width: 768px) {
   .page-shell {
     padding: 80px 16px 40px;
+  }
+  .top-nav {
+    height: auto;
+    min-height: 60px;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 12px 16px;
+  }
+  .nav-tabs {
+    order: 3;
+    width: 100%;
+    overflow-x: auto;
+  }
+  .nav-tab {
+    flex: 1 0 auto;
+  }
+  .snippet-form,
+  .snippet-row {
+    grid-template-columns: 1fr;
+  }
+  .form-actions,
+  .snippet-row .card-actions {
+    justify-content: flex-start;
+  }
+  .shot-hover-actions {
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+  }
+  .image-modal {
+    padding: 14px;
   }
   .shot-body {
     flex-direction: column;

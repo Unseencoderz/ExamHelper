@@ -2,7 +2,10 @@ import { api } from "./api.js";
 import { PROMPTS } from "./prompts.js";
 
 const state = {
+  activeView: "screenshots",
   items: [],
+  snippets: [],
+  config: null,
   stats: null,
   selectedIds: new Set(),
   extractedText: "",
@@ -21,6 +24,18 @@ const elements = {
   extractSelectedButton: document.querySelector("#extract-selected-btn"),
   deleteSelectedButton: document.querySelector("#delete-selected-btn"),
   promptList: document.querySelector("#prompt-list"),
+  navTabs: document.querySelectorAll("[data-view]"),
+  viewPanels: document.querySelectorAll("[data-panel]"),
+  snippetForm: document.querySelector("#snippet-form"),
+  snippetId: document.querySelector("#snippet-id"),
+  snippetShortcut: document.querySelector("#snippet-shortcut"),
+  snippetText: document.querySelector("#snippet-text"),
+  snippetCancelButton: document.querySelector("#snippet-cancel-btn"),
+  snippetsList: document.querySelector("#snippets-list"),
+  settingsForm: document.querySelector("#settings-form"),
+  screenshotHotkey: document.querySelector("#screenshot-hotkey"),
+  imageModal: document.querySelector("#image-modal"),
+  modalImage: document.querySelector("#modal-image"),
   toast: document.querySelector("#toast"),
 };
 
@@ -78,6 +93,10 @@ function selectedItems() {
   return state.items.filter((item) => state.selectedIds.has(item.id));
 }
 
+function screenshotById(id) {
+  return state.items.find((item) => item.id === id);
+}
+
 function setBusy(isBusy) {
   state.busy = isBusy;
   render();
@@ -86,20 +105,26 @@ function setBusy(isBusy) {
 async function loadDashboard(silent = false) {
   try {
     if (!silent) setStatus("Loading...");
-    const { screenshots, stats } = await api.loadDashboard();
-    
+    const { screenshots, stats, snippets, config } = await api.loadDashboard();
+
     // Check if anything fundamentally changed to avoid redundant re-renders
     const currentIds = state.items.map(i => i.id).join(",");
     const newIds = screenshots.items.map(i => i.id).join(",");
-    
-    if (currentIds !== newIds || !state.stats) {
+
+    const currentSnippetIds = state.snippets.map(i => `${i.id}:${i.updatedAt}`).join(",");
+    const newSnippetIds = snippets.items.map(i => `${i.id}:${i.updatedAt}`).join(",");
+    const configChanged = state.config?.screenshot_hotkey !== config.screenshot_hotkey;
+
+    if (currentIds !== newIds || currentSnippetIds !== newSnippetIds || configChanged || !state.stats) {
       const validIds = new Set(screenshots.items.map((item) => item.id));
       state.items = screenshots.items;
+      state.snippets = snippets.items;
+      state.config = config;
       state.stats = stats;
       state.selectedIds = new Set([...state.selectedIds].filter((id) => validIds.has(id)));
       render();
     }
-    
+
     setStatus(`Auto cleanup limit: ${stats.max_screenshots}`);
   } catch (error) {
     setStatus("Backend offline");
@@ -129,6 +154,55 @@ function renderPrompts() {
       </button>
     `;
   }).join("");
+}
+
+function renderViews() {
+  elements.navTabs.forEach((tab) => {
+    tab.classList.toggle("is-active", tab.dataset.view === state.activeView);
+  });
+  elements.viewPanels.forEach((panel) => {
+    panel.classList.toggle("is-active", panel.dataset.panel === state.activeView);
+  });
+}
+
+function renderSnippets() {
+  if (state.snippets.length === 0) {
+    elements.snippetsList.innerHTML = `
+      <div class="empty-state compact-empty">
+        <i class="ph ph-text-aa"></i>
+        <div>
+          <h3>No snippets yet</h3>
+          <p>Add a shortcut and it will sync to the desktop client.</p>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  elements.snippetsList.innerHTML = state.snippets
+    .map((snippet) => `
+      <article class="snippet-row" data-snippet-id="${escapeHtml(snippet.id)}">
+        <div>
+          <div class="snippet-shortcut">${escapeHtml(snippet.shortcut)}</div>
+          <pre class="snippet-preview">${escapeHtml(snippet.text)}</pre>
+        </div>
+        <div class="card-actions">
+          <button class="button button-secondary icon-btn" type="button" data-snippet-action="edit" data-id="${escapeHtml(snippet.id)}" title="Edit">
+            <i class="ph ph-pencil-simple"></i>
+          </button>
+          <button class="button button-danger icon-btn" type="button" data-snippet-action="delete" data-id="${escapeHtml(snippet.id)}" title="Delete">
+            <i class="ph ph-trash"></i>
+          </button>
+        </div>
+      </article>
+    `)
+    .join("");
+}
+
+function renderSettings() {
+  if (state.config) {
+    elements.screenshotHotkey.value = state.config.screenshot_hotkey;
+  }
 }
 
 function renderExtractionPanel() {
@@ -167,6 +241,14 @@ function renderScreenshots() {
             >
               <i class="ph ${selected ? 'ph-check-circle' : 'ph-circle'}"></i>
             </button>
+            <div class="shot-hover-actions">
+              <button class="button button-secondary icon-btn" type="button" data-action="copy-one" data-id="${item.id}" title="Copy">
+                <i class="ph ph-copy"></i>
+              </button>
+              <button class="button button-primary icon-btn" type="button" data-action="view-one" data-id="${item.id}" title="View">
+                <i class="ph ph-arrows-out-simple"></i>
+              </button>
+            </div>
             <img src="${escapeHtml(item.image_url || "")}" alt="Screenshot ${escapeHtml(item.id)}" loading="lazy" />
           </div>
 
@@ -176,9 +258,6 @@ function renderScreenshots() {
             </div>
 
             <div class="card-actions">
-              <button class="button button-secondary icon-btn" type="button" data-action="copy-one" data-id="${item.id}" title="Copy">
-                <i class="ph ph-copy"></i>
-              </button>
               <button class="button button-primary icon-btn" type="button" data-action="extract-one" data-id="${item.id}" title="Extract Text">
                 <i class="ph ph-sparkle"></i>
               </button>
@@ -194,8 +273,11 @@ function renderScreenshots() {
 }
 
 function render() {
+  renderViews();
   renderToolbar();
   renderPrompts();
+  renderSnippets();
+  renderSettings();
   renderExtractionPanel();
   renderScreenshots();
 }
@@ -209,6 +291,122 @@ function toggleSelection(id) {
     state.selectedIds.add(id);
   }
   render();
+}
+
+function resetSnippetForm() {
+  elements.snippetId.value = "";
+  elements.snippetShortcut.value = "";
+  elements.snippetText.value = "";
+  elements.snippetCancelButton.hidden = true;
+}
+
+function editSnippet(id) {
+  const snippet = state.snippets.find((item) => item.id === id);
+  if (!snippet) return;
+
+  elements.snippetId.value = snippet.id;
+  elements.snippetShortcut.value = snippet.shortcut;
+  elements.snippetText.value = snippet.text;
+  elements.snippetCancelButton.hidden = false;
+  elements.snippetShortcut.focus();
+}
+
+function dedentText(value) {
+  const lines = String(value).split(/\r?\n/);
+  const eol = value.includes("\r\n") ? "\r\n" : "\n";
+
+  return lines
+    .map((line) => line.replace(/^[\t ]+/, ""))
+    .join(eol);
+}
+
+async function persistSnippet(text) {
+  const id = elements.snippetId.value;
+  const payload = {
+    shortcut: elements.snippetShortcut.value.trim(),
+    text,
+  };
+
+  if (id) {
+    await api.updateSnippet(id, payload);
+    return "updated";
+  }
+
+  await api.createSnippet(payload);
+  return "created";
+}
+
+async function saveSnippet(event) {
+  event.preventDefault();
+  const saveMode = event.submitter?.dataset.saveMode || "exact";
+  const text =
+    saveMode === "dedent"
+      ? dedentText(elements.snippetText.value)
+      : elements.snippetText.value;
+
+  try {
+    setBusy(true);
+    const result = await persistSnippet(text);
+    showToast(result === "updated" ? "Snippet updated." : "Snippet created.");
+    resetSnippetForm();
+    await loadDashboard(true);
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function deleteSnippet(id) {
+  const snippet = state.snippets.find((item) => item.id === id);
+  if (!snippet || !window.confirm(`Delete snippet ${snippet.shortcut}?`)) {
+    return;
+  }
+
+  try {
+    setBusy(true);
+    await api.deleteSnippet(id);
+    if (elements.snippetId.value === id) {
+      resetSnippetForm();
+    }
+    await loadDashboard(true);
+    showToast("Snippet deleted.");
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function handleSnippetClick(event) {
+  const button = event.target.closest("[data-snippet-action]");
+  if (!button) return;
+
+  if (button.dataset.snippetAction === "edit") {
+    editSnippet(button.dataset.id);
+    return;
+  }
+
+  if (button.dataset.snippetAction === "delete") {
+    void deleteSnippet(button.dataset.id);
+  }
+}
+
+async function saveSettings(event) {
+  event.preventDefault();
+  try {
+    setBusy(true);
+    const response = await api.updateConfig({
+      screenshot_hotkey: elements.screenshotHotkey.value,
+    });
+    state.config = response.config;
+    render();
+    showToast("Screenshot hotkey updated.");
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    setBusy(false);
+  }
 }
 
 function parseTagInput(value) {
@@ -369,13 +567,45 @@ async function copySelected() {
   }
 }
 
+async function copySingleImage(id) {
+  try {
+    setBusy(true);
+    await copyImages([id]);
+    showToast("Copied screenshot to the clipboard.");
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function openImageModal(id) {
+  const item = screenshotById(id);
+  if (!item?.image_url) {
+    showToast("Unable to open screenshot.");
+    return;
+  }
+
+  elements.modalImage.src = item.image_url;
+  elements.modalImage.alt = `Screenshot ${item.id}`;
+  elements.imageModal.hidden = false;
+  document.body.classList.add("modal-open");
+}
+
+function closeImageModal() {
+  elements.imageModal.hidden = true;
+  elements.modalImage.removeAttribute("src");
+  elements.modalImage.alt = "";
+  document.body.classList.remove("modal-open");
+}
+
 async function extractSelected(ids = [...state.selectedIds]) {
   try {
     setBusy(true);
     setStatus("Extracting text with Gemini...");
     const response = await api.extractText(ids);
     state.extractedText = response.text || "";
-    
+
     // Attempt to auto-copy to clipboard if possible
     if (state.extractedText) {
       try {
@@ -387,7 +617,7 @@ async function extractSelected(ids = [...state.selectedIds]) {
     } else {
       showToast("No text found.");
     }
-    
+
     state.extractedItems = response.items || [];
     render();
     setStatus(`Auto cleanup limit: ${(state.stats && state.stats.max_screenshots) || 50}`);
@@ -447,7 +677,7 @@ function handlePromptClick(event) {
 
   const promptId = button.dataset.promptId;
   const action = button.dataset.promptAction;
-  
+
   if (action === "copy") {
     void copyPrompt(promptId);
   }
@@ -468,9 +698,12 @@ function handleScreenshotClick(event) {
   }
 
   if (action === "copy-one") {
-    state.selectedIds = new Set([id]);
-    render();
-    void copySelected();
+    void copySingleImage(id);
+    return;
+  }
+
+  if (action === "view-one") {
+    openImageModal(id);
     return;
   }
 
@@ -489,6 +722,13 @@ function handleScreenshotClick(event) {
 }
 
 function bindEvents() {
+  elements.navTabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      state.activeView = tab.dataset.view;
+      render();
+    });
+  });
+
   elements.selectAllButton.addEventListener("click", () => {
     state.selectedIds = new Set(state.items.map((item) => item.id));
     render();
@@ -513,9 +753,24 @@ function bindEvents() {
 
   elements.promptList.addEventListener("click", handlePromptClick);
   elements.screenshotsContainer.addEventListener("click", handleScreenshotClick);
+  elements.snippetForm.addEventListener("submit", saveSnippet);
+  elements.snippetCancelButton.addEventListener("click", resetSnippetForm);
+  elements.snippetsList.addEventListener("click", handleSnippetClick);
+  elements.settingsForm.addEventListener("submit", saveSettings);
+  elements.imageModal.addEventListener("click", (event) => {
+    if (event.target.closest("[data-modal-close]")) {
+      closeImageModal();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !elements.imageModal.hidden) {
+      closeImageModal();
+    }
+  });
 }
 
 bindEvents();
+resetSnippetForm();
 render();
 void loadDashboard();
 
