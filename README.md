@@ -21,6 +21,8 @@ ExamHelper/
 - Predefined AI prompts for code generation, problem solving, and direct answers
 - Gemini-powered text extraction for one or more selected screenshots
 - Copy extracted text back to the clipboard
+- Text snippet management with create, edit, and delete controls
+- Screenshot hotkey settings that sync to connected desktop clients
 
 ## Backend capabilities
 
@@ -32,11 +34,20 @@ The backend now provides:
 - `DELETE /screenshots/:id`
 - `POST /screenshots/bulk-delete`
 - `POST /extract-text`
+- `GET /client-state`
+- `GET /snippets`
+- `POST /snippets`
+- `PATCH /snippets/:id`
+- `DELETE /snippets/:id`
+- `GET /config`
+- `PATCH /config`
 - `GET /stats`
 - `GET /health`
+- Socket.IO realtime sync for snippets and screenshot hotkey changes
 - Static frontend hosting at `http://localhost:3000`
 
 Existing metadata is normalized on startup so older screenshot records still work after the folder move into `backend/uploads`.
+Snippet and hotkey configuration lives beside screenshot metadata under `backend/uploads/.app-state/`.
 
 ## Run the system
 
@@ -57,6 +68,24 @@ install_and_run.bat
 ```
 
 Default hotkey: `Win + Alt + C`
+
+The desktop client now also connects to the backend for realtime snippet and hotkey state. By default it derives the sync URL from the configured upload endpoint, so:
+
+```ini
+[upload]
+endpoint = https://your-service.example.com/upload
+```
+
+connects realtime sync to `https://your-service.example.com`. To override it explicitly:
+
+```ini
+[sync]
+enabled = true
+endpoint = https://your-service.example.com
+excluded_window_keywords = ExamHelper
+```
+
+Snippet expansion uses simulated keyboard input only. It does not read from or write to the clipboard.
 
 ### 3. Optional Gemini setup
 
