@@ -8,6 +8,8 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
+const http = require("http");
+const { Server } = require("socket.io");
 
 const ENV_FILE = path.join(__dirname, ".env");
 loadLocalEnv(ENV_FILE);
@@ -58,6 +60,9 @@ function loadLocalEnv(filePath) {
 const PORT = Number.parseInt(process.env.PORT || "3000", 10);
 const STORAGE_DIR = process.env.STORAGE_DIR || path.join(__dirname, "uploads");
 const META_DIR = path.join(STORAGE_DIR, ".meta");
+const APP_STATE_DIR = path.join(STORAGE_DIR, ".app-state");
+const SNIPPETS_FILE = path.join(APP_STATE_DIR, "snippets.json");
+const CONFIG_FILE = path.join(APP_STATE_DIR, "config.json");
 const LOG_FILE = path.join(__dirname, "server.log");
 const MAX_FILE_SIZE = Number.parseInt(process.env.MAX_FILE_SIZE_MB || "80", 10) * 1024 * 1024;
 const MAX_SCREENSHOTS = Number.parseInt(process.env.MAX_SCREENSHOTS || "50", 10);
@@ -67,8 +72,9 @@ const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models
   GEMINI_MODEL
 )}:generateContent`;
 const WEB_DIR = process.env.WEB_DIR || path.resolve(__dirname, "..", "web-frontend");
+const DEFAULT_SCREENSHOT_HOTKEY = process.env.DEFAULT_SCREENSHOT_HOTKEY || "Win+Alt+C";
 
-[STORAGE_DIR, META_DIR].forEach((dir) => fs.mkdirSync(dir, { recursive: true }));
+[STORAGE_DIR, META_DIR, APP_STATE_DIR].forEach((dir) => fs.mkdirSync(dir, { recursive: true }));
 
 function log(level, message, extra = "") {
   const line = `${new Date().toISOString()} [${level}] ${message} ${extra}`.trimEnd() + "\n";
@@ -87,6 +93,85 @@ function safeReadJson(filePath) {
     log("WARN", `Invalid JSON ignored: ${filePath}`, error.message);
     return null;
   }
+}
+
+function readJsonFile(filePath, fallbackValue) {
+  if (!fs.existsSync(filePath)) {
+    return fallbackValue;
+  }
+
+  const value = safeReadJson(filePath);
+  return value === null ? fallbackValue : value;
+}
+
+function writeJsonFile(filePath, value) {
+  fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+}
+
+function normalizeHotkey(value) {
+  return String(value || "")
+    .split("+")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join("+");
+}
+
+function validateHotkey(value) {
+  const hotkey = normalizeHotkey(value);
+  const tokens = hotkey.toLowerCase().split("+").filter(Boolean);
+  const modifiers = new Set(["ctrl", "control", "shift", "alt", "win", "windows", "cmd"]);
+  const keys = tokens.filter((token) => !modifiers.has(token));
+  if (tokens.length < 2 || keys.length !== 1) {
+    return null;
+  }
+  return hotkey;
+}
+
+function sanitizeSnippetPayload(payload, existing = {}) {
+  const shortcut = String(payload.shortcut ?? existing.shortcut ?? "").trim();
+  const text = String(payload.text ?? existing.text ?? "");
+  if (!shortcut || shortcut.length > 40) {
+    const error = new Error("Shortcut is required and must be 40 characters or fewer.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (/\s/.test(shortcut)) {
+    const error = new Error("Shortcut cannot contain whitespace.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (text.length > 8000) {
+    const error = new Error("Snippet text must be 8000 characters or fewer.");
+    error.statusCode = 400;
+    throw error;
+  }
+  return { shortcut, text };
+}
+
+function readSnippets() {
+  const snippets = readJsonFile(SNIPPETS_FILE, []);
+  return Array.isArray(snippets) ? snippets : [];
+}
+
+function writeSnippets(snippets) {
+  writeJsonFile(SNIPPETS_FILE, snippets);
+}
+
+function readAppConfig() {
+  const config = readJsonFile(CONFIG_FILE, {});
+  const screenshotHotkey = validateHotkey(config.screenshot_hotkey) || DEFAULT_SCREENSHOT_HOTKEY;
+  return { screenshot_hotkey: screenshotHotkey };
+}
+
+function writeAppConfig(config) {
+  writeJsonFile(CONFIG_FILE, config);
+}
+
+function getClientState() {
+  return {
+    snippets: readSnippets(),
+    config: readAppConfig(),
+  };
 }
 
 function parseTags(value) {
@@ -448,6 +533,21 @@ const upload = multer({
 });
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: "*",
+  },
+});
+
+function broadcastClientEvent(event, payload) {
+  io.emit(event, payload);
+}
+
+io.on("connection", (socket) => {
+  socket.emit("state_snapshot", getClientState());
+});
+
 app.use(express.json({ limit: "8mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(
@@ -473,6 +573,115 @@ app.get("/health", (req, res) => {
     timestamp: new Date().toISOString(),
     max_screenshots: MAX_SCREENSHOTS,
   });
+});
+
+app.get("/client-state", (req, res) => {
+  res.json(getClientState());
+});
+
+app.get("/snippets", (req, res) => {
+  res.json({ items: readSnippets() });
+});
+
+app.post("/snippets", (req, res) => {
+  try {
+    const snippetData = sanitizeSnippetPayload(req.body);
+    const snippets = readSnippets();
+    const duplicate = snippets.find(
+      (snippet) => snippet.shortcut.toLowerCase() === snippetData.shortcut.toLowerCase()
+    );
+    if (duplicate) {
+      return res.status(409).json({ error: "A snippet with this shortcut already exists." });
+    }
+
+    const now = new Date().toISOString();
+    const snippet = {
+      id: crypto.randomUUID(),
+      ...snippetData,
+      createdAt: now,
+      updatedAt: now,
+    };
+    snippets.push(snippet);
+    writeSnippets(snippets);
+    broadcastClientEvent("snippet_created", snippet);
+    res.status(201).json({ status: "created", item: snippet });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ error: error.message || "Unable to create snippet." });
+  }
+});
+
+app.patch("/snippets/:id", (req, res) => {
+  try {
+    const snippets = readSnippets();
+    const index = snippets.findIndex((snippet) => snippet.id === req.params.id);
+    if (index === -1) {
+      return res.status(404).json({ error: "Snippet not found." });
+    }
+
+    const snippetData = sanitizeSnippetPayload(req.body, snippets[index]);
+    const duplicate = snippets.find(
+      (snippet) =>
+        snippet.id !== req.params.id &&
+        snippet.shortcut.toLowerCase() === snippetData.shortcut.toLowerCase()
+    );
+    if (duplicate) {
+      return res.status(409).json({ error: "A snippet with this shortcut already exists." });
+    }
+
+    const updated = {
+      ...snippets[index],
+      ...snippetData,
+      updatedAt: new Date().toISOString(),
+    };
+    snippets[index] = updated;
+    writeSnippets(snippets);
+    broadcastClientEvent("snippet_updated", updated);
+    res.json({ status: "updated", item: updated });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ error: error.message || "Unable to update snippet." });
+  }
+});
+
+app.delete("/snippets/:id", (req, res) => {
+  try {
+    const snippets = readSnippets();
+    const index = snippets.findIndex((snippet) => snippet.id === req.params.id);
+    if (index === -1) {
+      return res.status(404).json({ error: "Snippet not found." });
+    }
+
+    const [removed] = snippets.splice(index, 1);
+    writeSnippets(snippets);
+    broadcastClientEvent("snippet_deleted", { id: removed.id, shortcut: removed.shortcut });
+    res.json({ status: "deleted", item: removed });
+  } catch (error) {
+    log("ERROR", `Failed to delete snippet ${req.params.id}`, error.message);
+    res.status(500).json({ error: "Unable to delete snippet." });
+  }
+});
+
+app.get("/config", (req, res) => {
+  res.json(readAppConfig());
+});
+
+app.patch("/config", (req, res) => {
+  const currentConfig = readAppConfig();
+  const nextHotkey =
+    req.body.screenshot_hotkey !== undefined
+      ? validateHotkey(req.body.screenshot_hotkey)
+      : currentConfig.screenshot_hotkey;
+
+  if (!nextHotkey) {
+    return res.status(400).json({ error: "Screenshot hotkey must include modifiers and one key." });
+  }
+
+  const nextConfig = {
+    ...currentConfig,
+    screenshot_hotkey: nextHotkey,
+  };
+  writeAppConfig(nextConfig);
+  broadcastClientEvent("hotkey_changed", { screenshot_hotkey: nextConfig.screenshot_hotkey });
+  res.json({ status: "updated", config: nextConfig });
 });
 
 app.post("/upload", (req, res, next) => {
@@ -716,11 +925,11 @@ if (startupTrimmed.length > 0) {
   log("INFO", `Startup cleanup removed ${startupTrimmed.length} screenshot(s)`);
 }
 
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   log("INFO", `ExamHelper backend running on http://localhost:${PORT}`);
   log("INFO", `Storage directory: ${STORAGE_DIR}`);
   log(
     "INFO",
-    "Endpoints ready: POST /upload, GET /screenshots, DELETE /screenshots/:id, POST /extract-text"
+    "Endpoints ready: POST /upload, GET /screenshots, GET/POST /snippets, PATCH /config, POST /extract-text"
   );
 });
