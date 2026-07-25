@@ -24,6 +24,16 @@ import pystray
 from pystray import MenuItem as item
 from PIL import Image as PILImage
 
+try:
+    import keyboard
+except ImportError:
+    keyboard = None
+
+try:
+    import socketio
+except ImportError:
+    socketio = None
+
 # ─── Logging Setup ────────────────────────────────────────────────────────────
 LOG_DIR = Path.home() / "AppData" / "Local" / "ScreenshotSync"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -50,7 +60,7 @@ DEFAULT_CONFIG = {
         "profile": "max_quality_v1",
     },
     "upload": {
-        "endpoint": "https://examhelper-6yn5.onrender.com/upload",
+        "endpoint": "https://microphonev2-backend.onrender.com/upload", 
         "device_id": str(uuid.uuid4()),
         "max_queue_size": "100",
         "max_retries": "5",
@@ -60,6 +70,11 @@ DEFAULT_CONFIG = {
     "storage": {
         "queue_dir": str(LOG_DIR / "queue"),
         "keep_on_success": "false",
+    },
+    "sync": {
+        "enabled": "true",
+        "endpoint": "",
+        "excluded_window_keywords": "ExamHelper",
     },
 }
 
@@ -324,6 +339,263 @@ class WindowsHotkeyListener:
 
 
 # ─── Queue Manager ────────────────────────────────────────────────────────────
+def derive_sync_endpoint(upload_endpoint: str, configured_endpoint: str = "") -> str:
+    configured_endpoint = (configured_endpoint or "").strip()
+    if configured_endpoint:
+        return configured_endpoint.rstrip("/")
+
+    endpoint = (upload_endpoint or "").strip()
+    if endpoint.endswith("/upload"):
+        endpoint = endpoint[:-len("/upload")]
+    return endpoint.rstrip("/")
+
+
+class TextSnippetExpander:
+    """Global text expander using simulated keystrokes and no clipboard access."""
+
+    TERMINATORS = {" ", "\n", "\t", ".", ",", "!", "?", ";", ":", ")", "]", "}"}
+    BOUNDARIES = set(" \n\t\r.,!?;:([{<\"'")
+    KEY_CHARS = {"space": " ", "enter": "\n", "tab": "\t", "decimal": "."}
+    IGNORED_MODIFIERS = {
+        "alt", "alt gr", "ctrl", "left ctrl", "right ctrl", "shift", "left shift",
+        "right shift", "windows", "left windows", "right windows", "cmd",
+    }
+
+    def __init__(self, excluded_keywords: list[str] | None = None):
+        self._snippets: dict[str, str] = {}
+        self._buffer = ""
+        self._max_shortcut_len = 20
+        self._lock = threading.Lock()
+        self._hook = None
+        self._suspended = threading.Event()
+        self._excluded_keywords = [keyword.lower() for keyword in (excluded_keywords or []) if keyword]
+
+    def start(self):
+        if keyboard is None:
+            log.warning("keyboard package is not installed; text snippet expansion is disabled.")
+            return
+        self._hook = keyboard.on_press(self._on_press, suppress=False)
+        log.info("Text snippet expander started")
+
+    def stop(self):
+        if keyboard is not None and self._hook is not None:
+            keyboard.unhook(self._hook)
+            self._hook = None
+
+    def replace_all(self, snippets: list[dict]):
+        with self._lock:
+            self._snippets = {
+                str(snippet.get("shortcut", "")).strip(): str(snippet.get("text", ""))
+                for snippet in snippets
+                if str(snippet.get("shortcut", "")).strip() and snippet.get("text") is not None
+            }
+            self._max_shortcut_len = max([20, *[len(shortcut) for shortcut in self._snippets]])
+            self._buffer = self._buffer[-(self._max_shortcut_len + 2):]
+        log.info(f"Loaded {len(self._snippets)} text snippet(s)")
+
+    def upsert(self, snippet: dict):
+        shortcut = str(snippet.get("shortcut", "")).strip()
+        text = str(snippet.get("text", ""))
+        if not shortcut:
+            return
+        with self._lock:
+            self._snippets[shortcut] = text
+            self._max_shortcut_len = max([20, *[len(key) for key in self._snippets]])
+        log.info(f"Snippet synced: {shortcut}")
+
+    def delete(self, payload: dict):
+        shortcut = str(payload.get("shortcut", "")).strip()
+        with self._lock:
+            if shortcut in self._snippets:
+                del self._snippets[shortcut]
+            self._max_shortcut_len = max([20, *[len(key) for key in self._snippets]])
+        log.info(f"Snippet removed: {shortcut}")
+
+    def _foreground_window_title(self) -> str:
+        try:
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            ctypes.windll.user32.GetWindowTextW(hwnd, buffer, length + 1)
+            return buffer.value
+        except Exception:
+            return ""
+
+    def _should_ignore_window(self) -> bool:
+        title = self._foreground_window_title().lower()
+        return bool(title and any(keyword in title for keyword in self._excluded_keywords))
+
+    def _on_press(self, event):
+        if self._suspended.is_set() or self._should_ignore_window():
+            return
+        if event.name in self.IGNORED_MODIFIERS:
+            return
+        if keyboard is not None and self._any_modifier_pressed():
+            return
+
+        char = self._event_to_char(event)
+        if char is None:
+            if event.name == "backspace":
+                with self._lock:
+                    self._buffer = self._buffer[:-1]
+            return
+
+        with self._lock:
+            self._buffer = (self._buffer + char)[-(self._max_shortcut_len + 2):]
+            match = self._find_match_locked()
+
+        if match:
+            shortcut, text, terminator = match
+            threading.Thread(
+                target=self._expand,
+                args=(shortcut, text, terminator),
+                daemon=True,
+                name="SnippetExpansion",
+            ).start()
+
+    def _event_to_char(self, event) -> str | None:
+        if not event.name:
+            return None
+        if event.name in self.KEY_CHARS:
+            return self.KEY_CHARS[event.name]
+        if len(event.name) == 1:
+            return event.name.upper() if keyboard and keyboard.is_pressed("shift") else event.name
+        return None
+
+    def _any_modifier_pressed(self) -> bool:
+        for name in ("ctrl", "alt", "windows", "left windows", "right windows"):
+            try:
+                if keyboard.is_pressed(name):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _find_match_locked(self) -> tuple[str, str, str] | None:
+        if not self._snippets or not self._buffer:
+            return None
+
+        terminator = self._buffer[-1] if self._buffer[-1] in self.TERMINATORS else ""
+        search_text = self._buffer[:-1] if terminator else self._buffer
+        for shortcut in sorted(self._snippets, key=len, reverse=True):
+            if not search_text.endswith(shortcut):
+                continue
+            prefix_index = len(search_text) - len(shortcut) - 1
+            has_boundary = prefix_index < 0 or search_text[prefix_index] in self.BOUNDARIES
+            if not has_boundary:
+                continue
+            if terminator or not self._has_longer_shortcut_prefix(shortcut):
+                return shortcut, self._snippets[shortcut], terminator
+        return None
+
+    def _has_longer_shortcut_prefix(self, shortcut: str) -> bool:
+        return any(
+            candidate != shortcut and candidate.startswith(shortcut)
+            for candidate in self._snippets
+        )
+
+    def _expand(self, shortcut: str, text: str, terminator: str):
+        if keyboard is None:
+            return
+        self._suspended.set()
+        try:
+            erase_count = len(shortcut) + (1 if terminator else 0)
+            for _ in range(erase_count):
+                keyboard.send("backspace")
+            self._type_text(text)
+            if terminator:
+                self._type_text(terminator)
+            with self._lock:
+                self._buffer = ""
+        except Exception as error:
+            log.error(f"Snippet expansion failed: {error}")
+        finally:
+            self._suspended.clear()
+
+    def _type_text(self, text: str):
+        for char in text:
+            if char == "\n":
+                keyboard.send("enter")
+            elif char == "\t":
+                keyboard.send("tab")
+            else:
+                keyboard.write(char)
+
+
+class RealtimeConfigSync:
+    """Socket.IO client that keeps snippets and screenshot hotkey state current."""
+
+    def __init__(self, endpoint: str, expander: TextSnippetExpander, hotkey_callback):
+        self.endpoint = endpoint
+        self.expander = expander
+        self.hotkey_callback = hotkey_callback
+        self._client = None
+
+    def start(self):
+        if not self.endpoint:
+            log.warning("Realtime sync endpoint is empty; snippet and hotkey push is disabled.")
+            return
+        if socketio is None:
+            log.warning("python-socketio is not installed; realtime sync is disabled.")
+            self._sync_once_from_rest()
+            return
+
+        self._client = socketio.Client(reconnection=True, reconnection_attempts=0, logger=False, engineio_logger=False)
+        self._client.on("connect", self._on_connect)
+        self._client.on("state_snapshot", self._on_state_snapshot)
+        self._client.on("snippet_created", self._on_snippet_upsert)
+        self._client.on("snippet_updated", self._on_snippet_upsert)
+        self._client.on("snippet_deleted", self._on_snippet_deleted)
+        self._client.on("hotkey_changed", self._on_hotkey_changed)
+        threading.Thread(target=self._connect, daemon=True, name="RealtimeConfigSync").start()
+
+    def stop(self):
+        if self._client is not None:
+            try:
+                self._client.disconnect()
+            except Exception:
+                pass
+
+    def _connect(self):
+        while True:
+            try:
+                self._client.connect(self.endpoint, transports=["websocket", "polling"])
+                self._client.wait()
+                return
+            except Exception as error:
+                log.warning(f"Realtime sync connection failed: {error}; retrying in 5s")
+                time.sleep(5)
+
+    def _sync_once_from_rest(self):
+        try:
+            response = requests.get(f"{self.endpoint}/client-state", timeout=10)
+            response.raise_for_status()
+            self._on_state_snapshot(response.json())
+            log.info("Loaded snippets and hotkey once via REST fallback")
+        except Exception as error:
+            log.warning(f"REST fallback state sync failed: {error}")
+
+    def _on_connect(self):
+        log.info(f"Realtime sync connected to {self.endpoint}")
+
+    def _on_state_snapshot(self, payload):
+        self.expander.replace_all(payload.get("snippets", []))
+        hotkey = payload.get("config", {}).get("screenshot_hotkey")
+        if hotkey:
+            self.hotkey_callback(hotkey)
+
+    def _on_snippet_upsert(self, payload):
+        self.expander.upsert(payload)
+
+    def _on_snippet_deleted(self, payload):
+        self.expander.delete(payload)
+
+    def _on_hotkey_changed(self, payload):
+        hotkey = payload.get("screenshot_hotkey")
+        if hotkey:
+            self.hotkey_callback(hotkey)
+
+
 class PersistentQueue:
     """File-backed queue so captures survive crashes/restarts."""
 
@@ -550,6 +822,17 @@ class ScreenshotSyncApp:
         self._last_hotkey_at = 0.0
         self._tray = None
         self._hotkey_listener = WindowsHotkeyListener(self.hotkey, self.on_hotkey)
+        excluded_keywords = [
+            keyword.strip()
+            for keyword in self.cfg.get("sync", "excluded_window_keywords", fallback="ExamHelper").split(",")
+            if keyword.strip()
+        ]
+        self.snippet_expander = TextSnippetExpander(excluded_keywords)
+        sync_endpoint = derive_sync_endpoint(
+            self.cfg.get("upload", "endpoint"),
+            self.cfg.get("sync", "endpoint", fallback=""),
+        )
+        self.realtime_sync = RealtimeConfigSync(sync_endpoint, self.snippet_expander, self._set_hotkey)
 
     def on_hotkey(self):
         self._request_capture("hotkey", enforce_cooldown=True)
@@ -626,6 +909,8 @@ class ScreenshotSyncApp:
 
     def _tray_quit(self, icon, item):
         log.info("Shutting down via tray")
+        self.realtime_sync.stop()
+        self.snippet_expander.stop()
         self.uploader.stop()
         self._hotkey_listener.stop()
         icon.stop()
@@ -663,6 +948,9 @@ class ScreenshotSyncApp:
             self.cfg = cfg
 
     def _set_hotkey(self, new_hotkey: str) -> bool:
+        if not new_hotkey or new_hotkey == self.hotkey:
+            return True
+
         try:
             WindowsHotkeyListener.parse(new_hotkey)
         except ValueError as error:
@@ -702,6 +990,9 @@ class ScreenshotSyncApp:
                 "to verify capture and keep the app running."
             )
         self.uploader.start()
+        if self.cfg.getboolean("sync", "enabled", fallback=True):
+            self.snippet_expander.start()
+            self.realtime_sync.start()
 
         icon_img = make_tray_icon(self)
         self._tray = pystray.Icon("Microphone", icon_img, "Microphone", self._make_menu())
