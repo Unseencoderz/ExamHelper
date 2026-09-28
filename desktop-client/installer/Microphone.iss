@@ -31,9 +31,7 @@ Source: "..\dist\Microphone.exe"; DestDir: "{app}"; Flags: ignoreversion
 [Icons]
 Name: "{group}\Microphone"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
 Name: "{autodesktop}\Microphone"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
-
-[Registry]
-Root: HKA; Subkey: "SOFTWARE\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Microphone"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue
+Name: "{userstartup}\Microphone"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch Microphone"; Flags: postinstall nowait skipifsilent

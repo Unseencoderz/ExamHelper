@@ -18,26 +18,54 @@ async function request(url, options = {}) {
 }
 
 export const api = {
-  async loadDashboard() {
-    const [screenshots, stats, snippets, config] = await Promise.all([
+  async loadDashboard(archivePage = 1) {
+    const [screenshots, archive, stats, snippets, config, clipboard] = await Promise.all([
       request("/screenshots?limit=100"),
+      request(`/archive?page=${archivePage}&limit=100`),
       request("/stats"),
       request("/snippets"),
       request("/config"),
+      request("/clipboard"),
     ]);
 
-    return { screenshots, stats, snippets, config };
+    return { screenshots, archive, stats, snippets, config, clipboard };
   },
 
-  async deleteScreenshot(id) {
+  async archiveScreenshots(ids) {
+    return request("/screenshots/bulk-delete", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    });
+  },
+
+  async archiveScreenshot(id) {
     return request(`/screenshots/${encodeURIComponent(id)}`, {
       method: "DELETE",
     });
   },
 
-  async bulkDelete(ids) {
-    return request("/screenshots/bulk-delete", {
+  async restoreScreenshot(id) {
+    return request(`/archive/${encodeURIComponent(id)}/restore`, {
       method: "POST",
+    });
+  },
+
+  async restoreScreenshots(ids) {
+    return request("/screenshots/bulk-restore", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    });
+  },
+
+  async permanentlyDeleteScreenshot(id) {
+    return request(`/archive/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+  },
+
+  async permanentlyDeleteScreenshots(ids) {
+    return request("/archive/bulk-delete", {
+      method: "DELETE",
       body: JSON.stringify({ ids }),
     });
   },
@@ -46,13 +74,6 @@ export const api = {
     return request(`/screenshots/${encodeURIComponent(id)}`, {
       method: "PATCH",
       body: JSON.stringify({ tags }),
-    });
-  },
-
-  async extractText(ids) {
-    return request("/extract-text", {
-      method: "POST",
-      body: JSON.stringify({ ids }),
     });
   },
 
@@ -81,5 +102,20 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(config),
     });
+  },
+
+  async pushClipboard(content) {
+    return request("/clipboard/push", {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    });
+  },
+
+  async deleteClipboardHistoryEntry(id) {
+    return request(`/clipboard/history/${encodeURIComponent(id)}`, { method: "DELETE" });
+  },
+
+  async clearClipboardHistory() {
+    return request("/clipboard/history", { method: "DELETE" });
   },
 };

@@ -12,8 +12,6 @@ services:
         value: 20
       - key: PORT
         value: 10000
-      - key: GEMINI_MODEL
-        value: gemini-2.5-flash
       - key: MAX_SCREENSHOTS
         value: 50
       - key: MAX_FILE_SIZE_MB
@@ -22,8 +20,10 @@ services:
         value: /opt/render/project/src/backend/uploads
       - key: WEB_DIR
         value: /opt/render/project/src/web-frontend
-      - key: GEMINI_API_KEY
+      - key: CLOUDINARY_URL
         sync: false
+      - key: CLOUDINARY_ARCHIVE_FOLDER
+        value: examhelper/archive
     disk:
       name: uploads
       mountPath: /opt/render/project/src/backend/uploads

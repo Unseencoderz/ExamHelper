@@ -4,7 +4,6 @@ Runs in background, listens for global hotkey, captures screen, uploads to serve
 """
 
 import sys
-import os
 import io
 import time
 import uuid
@@ -12,6 +11,7 @@ import json
 import queue
 import ctypes
 import logging
+from logging.handlers import RotatingFileHandler
 import threading
 import datetime
 import configparser
@@ -20,9 +20,6 @@ from ctypes import wintypes
 
 import requests
 from PIL import ImageGrab, Image
-import pystray
-from pystray import MenuItem as item
-from PIL import Image as PILImage
 
 try:
     import keyboard
@@ -34,6 +31,21 @@ try:
 except ImportError:
     socketio = None
 
+try:
+    import pyperclip
+except ImportError:
+    pyperclip = None
+
+if sys.platform == "win32":
+    try:
+        import win32clipboard
+        import win32con
+        import win32gui
+    except ImportError:
+        win32clipboard = win32con = win32gui = None
+else:
+    win32clipboard = win32con = win32gui = None
+
 # ─── Logging Setup ────────────────────────────────────────────────────────────
 LOG_DIR = Path.home() / "AppData" / "Local" / "ScreenshotSync"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -43,8 +55,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(LOG_DIR / "client.log"),
-        logging.StreamHandler(sys.stdout),
+        RotatingFileHandler(LOG_DIR / "client.log", maxBytes=1_000_000, backupCount=3, encoding="utf-8"),
     ],
 )
 log = logging.getLogger("ScreenshotSync")
@@ -60,7 +71,7 @@ DEFAULT_CONFIG = {
         "profile": "max_quality_v1",
     },
     "upload": {
-        "endpoint": "https://microphonev2-backend.onrender.com/upload", 
+        "endpoint": "http://localhost:3000/upload",
         "device_id": str(uuid.uuid4()),
         "max_queue_size": "100",
         "max_retries": "5",
@@ -522,13 +533,160 @@ class TextSnippetExpander:
                 keyboard.write(char)
 
 
-class RealtimeConfigSync:
-    """Socket.IO client that keeps snippets and screenshot hotkey state current."""
+class ClipboardWatcher:
+    """Silently mirrors plain-text clipboard changes while the Socket.IO client is connected."""
 
-    def __init__(self, endpoint: str, expander: TextSnippetExpander, hotkey_callback):
+    WM_CLIPBOARDUPDATE = 0x031D
+    HWND_MESSAGE = -3
+
+    def __init__(self, on_change, is_connected):
+        self.on_change = on_change
+        self.is_connected = is_connected
+        self._baseline = None
+        self._baseline_lock = threading.Lock()
+        self._started = False
+        self._stop = threading.Event()
+        self._thread = None
+        self._hwnd = None
+
+    def start(self):
+        if self._started:
+            return
+        self._started = True
+        try:
+            self._set_baseline(self._read_text())
+        except Exception as error:
+            log.error(f"Initial clipboard read failed: {error}")
+            self._set_baseline(None)
+        target = self._run_windows_listener if win32gui is not None else self._run_polling_listener
+        self._thread = threading.Thread(target=target, daemon=True, name="ClipboardWatcher")
+        self._thread.start()
+        log.info("Clipboard watcher started")
+
+    def stop(self):
+        self._stop.set()
+        if self._hwnd and win32gui is not None:
+            try:
+                win32gui.PostMessage(self._hwnd, win32con.WM_CLOSE, 0, 0)
+            except Exception:
+                pass
+
+    def apply_server_push(self, content):
+        if not isinstance(content, str):
+            return
+        try:
+            # Set this before the write posts WM_CLIPBOARDUPDATE to prevent an echo upload.
+            self._set_baseline(content)
+            self._write_text(content)
+        except Exception as error:
+            log.error(f"Clipboard push failed: {error}")
+
+    def _set_baseline(self, content):
+        with self._baseline_lock:
+            self._baseline = content
+
+    def _handle_clipboard_change(self):
+        try:
+            content = self._read_text()
+            if content is None:
+                return
+            with self._baseline_lock:
+                if content == self._baseline:
+                    return
+                # A disconnected change is intentionally dropped, but still becomes the baseline.
+                self._baseline = content
+            if self.is_connected():
+                self.on_change(content)
+        except Exception as error:
+            log.error(f"Clipboard read or upload failed: {error}")
+
+    def _read_text(self):
+        if win32clipboard is not None:
+            for _ in range(3):
+                try:
+                    win32clipboard.OpenClipboard()
+                    try:
+                        if not win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+                            return None
+                        value = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+                        return value if isinstance(value, str) else None
+                    finally:
+                        win32clipboard.CloseClipboard()
+                except Exception:
+                    time.sleep(0.05)
+            return None
+        if pyperclip is None:
+            return None
+        value = pyperclip.paste()
+        return value if isinstance(value, str) else None
+
+    def _write_text(self, content: str):
+        if win32clipboard is not None:
+            for attempt in range(3):
+                try:
+                    win32clipboard.OpenClipboard()
+                    try:
+                        win32clipboard.EmptyClipboard()
+                        win32clipboard.SetClipboardText(content, win32con.CF_UNICODETEXT)
+                        return
+                    finally:
+                        win32clipboard.CloseClipboard()
+                except Exception:
+                    if attempt == 2:
+                        raise
+                    time.sleep(0.05)
+            return
+        if pyperclip is None:
+            raise RuntimeError("pyperclip is not installed")
+        pyperclip.copy(content)
+
+    def _run_windows_listener(self):
+        class_name = f"ExamHelperClipboardWatcher{uuid.uuid4().hex}"
+
+        def window_proc(hwnd, message, wparam, lparam):
+            if message == self.WM_CLIPBOARDUPDATE:
+                self._handle_clipboard_change()
+                return 0
+            if message == win32con.WM_CLOSE:
+                win32gui.DestroyWindow(hwnd)
+                return 0
+            if message == win32con.WM_DESTROY:
+                win32gui.PostQuitMessage(0)
+                return 0
+            return win32gui.DefWindowProc(hwnd, message, wparam, lparam)
+
+        try:
+            wc = win32gui.WNDCLASS()
+            wc.lpfnWndProc = window_proc
+            wc.lpszClassName = class_name
+            win32gui.RegisterClass(wc)
+            self._hwnd = win32gui.CreateWindowEx(0, class_name, class_name, 0, 0, 0, 0, 0, self.HWND_MESSAGE, 0, 0, None)
+            win32gui.AddClipboardFormatListener(self._hwnd)
+            win32gui.PumpMessages()
+        except Exception as error:
+            log.error(f"Native clipboard listener failed; using polling fallback: {error}")
+            self._run_polling_listener()
+        finally:
+            if self._hwnd:
+                try:
+                    win32gui.RemoveClipboardFormatListener(self._hwnd)
+                except Exception:
+                    pass
+                self._hwnd = None
+
+    def _run_polling_listener(self):
+        while not self._stop.wait(0.4):
+            self._handle_clipboard_change()
+
+
+class RealtimeConfigSync:
+    """Socket.IO client that keeps snippets, hotkey, and clipboard state current."""
+
+    def __init__(self, endpoint: str, expander: TextSnippetExpander, hotkey_callback, clipboard_watcher: ClipboardWatcher):
         self.endpoint = endpoint
         self.expander = expander
         self.hotkey_callback = hotkey_callback
+        self.clipboard_watcher = clipboard_watcher
         self._client = None
 
     def start(self):
@@ -547,9 +705,11 @@ class RealtimeConfigSync:
         self._client.on("snippet_updated", self._on_snippet_upsert)
         self._client.on("snippet_deleted", self._on_snippet_deleted)
         self._client.on("hotkey_changed", self._on_hotkey_changed)
+        self._client.on("clipboard:push", self._on_clipboard_push)
         threading.Thread(target=self._connect, daemon=True, name="RealtimeConfigSync").start()
 
     def stop(self):
+        self.clipboard_watcher.stop()
         if self._client is not None:
             try:
                 self._client.disconnect()
@@ -557,14 +717,11 @@ class RealtimeConfigSync:
                 pass
 
     def _connect(self):
-        while True:
-            try:
-                self._client.connect(self.endpoint, transports=["websocket", "polling"])
-                self._client.wait()
-                return
-            except Exception as error:
-                log.warning(f"Realtime sync connection failed: {error}; retrying in 5s")
-                time.sleep(5)
+        try:
+            self._client.connect(self.endpoint, transports=["websocket", "polling"], wait_timeout=10, auth={"client": "desktop"}, headers={"X-ExamHelper-Client": "desktop"})
+            self._client.wait()
+        except Exception as error:
+            log.warning(f"Realtime sync connection failed: {error}")
 
     def _sync_once_from_rest(self):
         try:
@@ -577,6 +734,7 @@ class RealtimeConfigSync:
 
     def _on_connect(self):
         log.info(f"Realtime sync connected to {self.endpoint}")
+        self.clipboard_watcher.start()
 
     def _on_state_snapshot(self, payload):
         self.expander.replace_all(payload.get("snippets", []))
@@ -594,6 +752,19 @@ class RealtimeConfigSync:
         hotkey = payload.get("screenshot_hotkey")
         if hotkey:
             self.hotkey_callback(hotkey)
+
+    def _on_clipboard_push(self, payload):
+        self.clipboard_watcher.apply_server_push(payload.get("content") if isinstance(payload, dict) else payload)
+
+    def is_connected(self) -> bool:
+        return bool(self._client and self._client.connected)
+
+    def emit_clipboard_update(self, content: str):
+        if self.is_connected():
+            try:
+                self._client.emit("clipboard:update", {"content": content})
+            except Exception as error:
+                log.error(f"Clipboard upload failed: {error}")
 
 
 class PersistentQueue:
@@ -789,22 +960,6 @@ class Uploader:
         return False
 
 
-# ─── System Tray Icon ─────────────────────────────────────────────────────────
-def make_tray_icon(app: "ScreenshotSyncApp"):
-    """Create a simple microphone icon for the system tray."""
-    size = 64
-    img = PILImage.new("RGBA", (size, size), (0, 0, 0, 0))
-    from PIL import ImageDraw
-    draw = ImageDraw.Draw(img)
-    draw.rounded_rectangle([23, 8, 41, 38], radius=9, fill=(38, 118, 181), outline=(255, 255, 255), width=2)
-    draw.arc([15, 24, 49, 52], start=0, end=180, fill=(255, 255, 255), width=4)
-    draw.line([32, 50, 32, 58], fill=(255, 255, 255), width=4)
-    draw.line([23, 58, 41, 58], fill=(255, 255, 255), width=4)
-    draw.line([30, 14, 34, 14], fill=(255, 255, 255), width=2)
-    draw.line([30, 21, 34, 21], fill=(255, 255, 255), width=2)
-    return img
-
-
 class ScreenshotSyncApp:
     def __init__(self):
         self.cfg = load_config()
@@ -820,7 +975,7 @@ class ScreenshotSyncApp:
         self._capturing = False
         self._capture_lock = threading.Lock()
         self._last_hotkey_at = 0.0
-        self._tray = None
+        self._stop = threading.Event()
         self._hotkey_listener = WindowsHotkeyListener(self.hotkey, self.on_hotkey)
         excluded_keywords = [
             keyword.strip()
@@ -832,7 +987,13 @@ class ScreenshotSyncApp:
             self.cfg.get("upload", "endpoint"),
             self.cfg.get("sync", "endpoint", fallback=""),
         )
-        self.realtime_sync = RealtimeConfigSync(sync_endpoint, self.snippet_expander, self._set_hotkey)
+        self.clipboard_watcher = ClipboardWatcher(
+            lambda content: self.realtime_sync.emit_clipboard_update(content),
+            lambda: self.realtime_sync.is_connected(),
+        )
+        self.realtime_sync = RealtimeConfigSync(
+            sync_endpoint, self.snippet_expander, self._set_hotkey, self.clipboard_watcher
+        )
 
     def on_hotkey(self):
         self._request_capture("hotkey", enforce_cooldown=True)
@@ -904,48 +1065,12 @@ class ScreenshotSyncApp:
             with self._capture_lock:
                 self._capturing = False
 
-    def _tray_capture_now(self, icon, item):
-        self._request_capture("tray", enforce_cooldown=False)
-
-    def _tray_quit(self, icon, item):
-        log.info("Shutting down via tray")
+    def stop(self):
         self.realtime_sync.stop()
         self.snippet_expander.stop()
         self.uploader.stop()
         self._hotkey_listener.stop()
-        icon.stop()
-
-    def _tray_status(self, icon, item):
-        size = self.pq.size()
-        log.info(f"Queue size: {size}")
-
-    def _make_menu(self):
-        return pystray.Menu(
-            item("Microphone — Running", lambda i, m: None, enabled=False),
-            item(f"Hotkey: {self.hotkey}", lambda i, m: None, enabled=False),
-            pystray.Menu.SEPARATOR,
-            item("Open Config", self._tray_open_config),
-            item("Reload Hotkey", self._tray_reload_hotkey),
-            item("Capture Now", self._tray_capture_now),
-            item("Check Queue Size", self._tray_status),
-            item("Quit", self._tray_quit),
-        )
-
-    def _tray_open_config(self, icon, item):
-        try:
-            os.startfile(CONFIG_PATH)
-        except Exception as error:
-            log.error(f"Could not open config file: {error}")
-
-    def _tray_reload_hotkey(self, icon, item):
-        cfg = configparser.ConfigParser()
-        cfg.read_dict(DEFAULT_CONFIG)
-        cfg.read(CONFIG_PATH)
-        new_hotkey = cfg.get("capture", "hotkey", fallback=self.hotkey).strip()
-        if not new_hotkey or new_hotkey == self.hotkey:
-            return
-        if self._set_hotkey(new_hotkey):
-            self.cfg = cfg
+        self._stop.set()
 
     def _set_hotkey(self, new_hotkey: str) -> bool:
         if not new_hotkey or new_hotkey == self.hotkey:
@@ -972,9 +1097,6 @@ class ScreenshotSyncApp:
         self._hotkey_listener = replacement
         self.cfg.set("capture", "hotkey", new_hotkey)
         save_config(self.cfg)
-        if self._tray:
-            self._tray.menu = self._make_menu()
-            self._tray.update_menu()
         return True
 
     def run(self):
@@ -986,18 +1108,14 @@ class ScreenshotSyncApp:
         hotkey_registered = self._hotkey_listener.start()
         if not hotkey_registered:
             log.error(
-                "Global hotkey registration failed. Use the tray menu's Capture Now action "
-                "to verify capture and keep the app running."
+                "Global hotkey registration failed; screenshot hotkeys are unavailable."
             )
         self.uploader.start()
         if self.cfg.getboolean("sync", "enabled", fallback=True):
             self.snippet_expander.start()
             self.realtime_sync.start()
 
-        icon_img = make_tray_icon(self)
-        self._tray = pystray.Icon("Microphone", icon_img, "Microphone", self._make_menu())
-        log.info("System tray icon created — running in background")
-        self._tray.run()
+        self._stop.wait()
 
 
 # ─── Entry Point ──────────────────────────────────────────────────────────────
@@ -1010,5 +1128,8 @@ if __name__ == "__main__":
     app = ScreenshotSyncApp()
     try:
         app.run()
+    except KeyboardInterrupt:
+        app.stop()
     finally:
+        app.stop()
         instance_guard.close()
