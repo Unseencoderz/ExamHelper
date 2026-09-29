@@ -145,13 +145,25 @@ export default function ImageViewer({
     }
   }
 
-  function handleDownload() {
-    const a = document.createElement('a');
-    a.href = item.image_url;
-    a.download = item.filename || `screenshot-${item.id}.png`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+  async function handleDownload() {
+    try {
+      // Browsers ignore the download attribute for cross-origin Cloudinary URLs.
+      // Turning the response into a blob makes the generated URL same-origin,
+      // so the click always downloads rather than navigating to the image.
+      const response = await fetch(item.image_url);
+      if (!response.ok) throw new Error(`Image download failed (${response.status}).`);
+
+      const objectUrl = URL.createObjectURL(await response.blob());
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = item.filename || `screenshot-${item.id}.png`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(objectUrl);
+    } catch (error) {
+      onCopyError(error instanceof Error ? error.message : 'Failed to download the image.');
+    }
   }
 
   const cropPixelW = crop ? Math.round(crop.width * imgNaturalSize.width) : 0;
