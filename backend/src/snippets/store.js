@@ -1,5 +1,4 @@
-const { SNIPPETS_FILE } = require("../config");
-const { readJsonFile, writeJsonFile } = require("../jsonStore");
+const { requireSupabase, throwIfDatabaseError } = require("../supabase");
 
 function sanitizeSnippetPayload(payload, existing = {}) {
   const shortcut = String(payload.shortcut ?? existing.shortcut ?? "").trim();
@@ -21,10 +20,38 @@ function sanitizeSnippetPayload(payload, existing = {}) {
   }
   return { shortcut, text };
 }
-function readSnippets() {
-  const snippets = readJsonFile(SNIPPETS_FILE, []);
-  return Array.isArray(snippets) ? snippets : [];
+
+function toSnippet(row) {
+  return { id: row.id, shortcut: row.shortcut, text: row.text, createdAt: row.created_at, updatedAt: row.updated_at };
 }
-function writeSnippets(snippets) { writeJsonFile(SNIPPETS_FILE, snippets); }
+
+async function readSnippets() {
+  const { data, error } = await requireSupabase().from("snippets").select("*").order("created_at", { ascending: true });
+  throwIfDatabaseError(error, "read snippets");
+  return (data || []).map(toSnippet);
+}
+
+async function writeSnippets(snippets) {
+  const supabase = requireSupabase();
+  const existing = await readSnippets();
+  const ids = new Set(snippets.map((snippet) => snippet.id));
+  for (const snippet of existing) {
+    if (!ids.has(snippet.id)) {
+      const { error } = await supabase.from("snippets").delete().eq("id", snippet.id);
+      throwIfDatabaseError(error, "delete snippet");
+    }
+  }
+  if (snippets.length === 0) return [];
+  const rows = snippets.map((snippet) => ({
+    id: snippet.id,
+    shortcut: snippet.shortcut,
+    text: snippet.text,
+    created_at: snippet.createdAt,
+    updated_at: snippet.updatedAt,
+  }));
+  const { data, error } = await supabase.from("snippets").upsert(rows, { onConflict: "id" }).select();
+  throwIfDatabaseError(error, "save snippets");
+  return (data || []).map(toSnippet);
+}
 
 module.exports = { readSnippets, writeSnippets, sanitizeSnippetPayload };

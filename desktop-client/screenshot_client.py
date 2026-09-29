@@ -125,15 +125,23 @@ def upgrade_capture_quality(
     return True
 
 
-def upgrade_upload_endpoint(cfg: configparser.ConfigParser) -> bool:
-    """One-time migration that updates localhost endpoints to the production default."""
-    target_endpoint = DEFAULT_CONFIG["upload"]["endpoint"]
-    current_endpoint = cfg.get("upload", "endpoint", fallback="")
-    if current_endpoint != target_endpoint and ("localhost" in current_endpoint or "127.0.0.1" in current_endpoint):
-        cfg.set("upload", "endpoint", target_endpoint)
-        log.info(f"Upload endpoint upgraded to {target_endpoint}")
-        return True
-    return False
+def apply_packaged_endpoints(cfg: configparser.ConfigParser) -> bool:
+    """Make the endpoint packaged in this executable win over saved client settings."""
+    changed = False
+    for section, key in (("upload", "endpoint"), ("sync", "endpoint")):
+        target_endpoint = DEFAULT_CONFIG[section][key]
+        current_endpoint = cfg.get(section, key, fallback="")
+        if current_endpoint != target_endpoint:
+            cfg.set(section, key, target_endpoint)
+            changed = True
+
+    if changed:
+        log.info(
+            "Server endpoints reset from this executable's packaged configuration: "
+            f"upload={DEFAULT_CONFIG['upload']['endpoint']}, "
+            f"sync={DEFAULT_CONFIG['sync']['endpoint'] or '(derived from upload)'}"
+        )
+    return changed
 
 
 def load_config() -> configparser.ConfigParser:
@@ -158,7 +166,7 @@ def load_config() -> configparser.ConfigParser:
     ):
         changed = True
 
-    if upgrade_upload_endpoint(cfg):
+    if apply_packaged_endpoints(cfg):
         changed = True
 
     if changed:

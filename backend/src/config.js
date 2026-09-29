@@ -29,20 +29,19 @@ function loadLocalEnv(filePath) {
 loadLocalEnv(path.join(__dirname, "..", ".env"));
 
 const PORT = Number.parseInt(process.env.PORT || "3000", 10);
-const STORAGE_DIR = process.env.STORAGE_DIR || path.join(__dirname, "..", "uploads");
-const META_DIR = path.join(STORAGE_DIR, ".meta");
-const APP_STATE_DIR = path.join(STORAGE_DIR, ".app-state");
-const SNIPPETS_FILE = path.join(APP_STATE_DIR, "snippets.json");
-const CONFIG_FILE = path.join(APP_STATE_DIR, "config.json");
-const CLIPBOARD_FILE = path.join(APP_STATE_DIR, "clipboard.json");
-const LOG_FILE = path.join(__dirname, "..", "server.log");
 const MAX_FILE_SIZE = Number.parseInt(process.env.MAX_FILE_SIZE_MB || "80", 10) * 1024 * 1024;
 const MAX_SCREENSHOTS = Number.parseInt(process.env.MAX_SCREENSHOTS || "50", 10);
 const ARCHIVE_AFTER_MS = 30 * 60 * 1000;
-const WEB_DIR = process.env.WEB_DIR || path.resolve(__dirname, "..", "..", "web-frontend");
+const WEB_DIR = process.env.WEB_DIR || path.resolve(__dirname, "..", "..", "web-app", "dist");
 const DEFAULT_SCREENSHOT_HOTKEY = process.env.DEFAULT_SCREENSHOT_HOTKEY || "Win+Alt+C";
-const CLOUDINARY_ARCHIVE_FOLDER = (process.env.CLOUDINARY_ARCHIVE_FOLDER || "examhelper/archive").replace(/^\/+|\/+$/g, "") || "examhelper/archive";
+const CLOUDINARY_SCREENSHOT_FOLDER = (process.env.CLOUDINARY_SCREENSHOT_FOLDER || process.env.CLOUDINARY_ARCHIVE_FOLDER || "examhelper/screenshots").replace(/^\/+|\/+$/g, "") || "examhelper/screenshots";
 const CLOUDINARY_CONFIGURED = Boolean(process.env.CLOUDINARY_URL || (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET));
+const SUPABASE_URL = process.env.SUPABASE_URL || "";
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const SUPABASE_CONFIGURED = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+const ADMIN_SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || "";
+const ADMIN_SESSION_TTL_HOURS = Math.max(Number.parseInt(process.env.ADMIN_SESSION_TTL_HOURS || "24", 10) || 24, 1);
+const ADMIN_SESSION_CONFIGURED = Boolean(ADMIN_SESSION_SECRET);
 
 if (CLOUDINARY_CONFIGURED) {
   cloudinary.config(process.env.CLOUDINARY_URL ? { secure: true } : {
@@ -53,6 +52,4 @@ if (CLOUDINARY_CONFIGURED) {
   });
 }
 
-[STORAGE_DIR, META_DIR, APP_STATE_DIR].forEach((dir) => fs.mkdirSync(dir, { recursive: true }));
-
-module.exports = { loadLocalEnv, PORT, STORAGE_DIR, META_DIR, APP_STATE_DIR, SNIPPETS_FILE, CONFIG_FILE, CLIPBOARD_FILE, LOG_FILE, MAX_FILE_SIZE, MAX_SCREENSHOTS, ARCHIVE_AFTER_MS, WEB_DIR, DEFAULT_SCREENSHOT_HOTKEY, CLOUDINARY_ARCHIVE_FOLDER, CLOUDINARY_CONFIGURED, cloudinary };
+module.exports = { loadLocalEnv, PORT, MAX_FILE_SIZE, MAX_SCREENSHOTS, ARCHIVE_AFTER_MS, WEB_DIR, DEFAULT_SCREENSHOT_HOTKEY, CLOUDINARY_SCREENSHOT_FOLDER, CLOUDINARY_CONFIGURED, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_CONFIGURED, ADMIN_SESSION_SECRET, ADMIN_SESSION_TTL_HOURS, ADMIN_SESSION_CONFIGURED, cloudinary };

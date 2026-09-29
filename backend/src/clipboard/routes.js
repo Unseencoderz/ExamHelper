@@ -13,7 +13,10 @@ function contentFrom(payload) {
 function createClipboardRouter({ broadcastClientEvent, pushClipboard }) {
   const router = express.Router();
 
-  router.get("/clipboard", (req, res) => res.json(readClipboard()));
+  router.get("/clipboard", async (req, res) => {
+    try { res.json(await readClipboard()); }
+    catch (error) { res.status(error.statusCode || 500).json({ error: "Unable to load clipboard history." }); }
+  });
   router.post("/clipboard/push", (req, res) => {
     try {
       const content = contentFrom(req.body);
@@ -23,17 +26,21 @@ function createClipboardRouter({ broadcastClientEvent, pushClipboard }) {
     }
   });
 
-  router.delete("/clipboard/history", (req, res) => {
-    const clipboard = clearClipboardHistory();
-    broadcastClientEvent("clipboard_updated", clipboard);
-    res.json(clipboard);
+  router.delete("/clipboard/history", async (req, res) => {
+    try {
+      const clipboard = await clearClipboardHistory();
+      broadcastClientEvent("clipboard_updated", clipboard);
+      res.json(clipboard);
+    } catch (error) { res.status(error.statusCode || 500).json({ error: "Unable to clear clipboard history." }); }
   });
 
-  router.delete("/clipboard/history/:id", (req, res) => {
-    const clipboard = deleteClipboardEntry(req.params.id);
-    if (!clipboard.removed) return res.status(404).json({ error: "Clipboard history entry not found." });
-    broadcastClientEvent("clipboard_updated", { history: clipboard.history });
-    return res.json({ history: clipboard.history });
+  router.delete("/clipboard/history/:id", async (req, res) => {
+    try {
+      const clipboard = await deleteClipboardEntry(req.params.id);
+      if (!clipboard.removed) return res.status(404).json({ error: "Clipboard history entry not found." });
+      broadcastClientEvent("clipboard_updated", { history: clipboard.history });
+      return res.json({ history: clipboard.history });
+    } catch (error) { return res.status(error.statusCode || 500).json({ error: "Unable to delete clipboard history entry." }); }
   });
 
   return router;

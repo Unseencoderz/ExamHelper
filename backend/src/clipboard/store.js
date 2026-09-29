@@ -1,54 +1,45 @@
-const { CLIPBOARD_FILE } = require("../config");
-const { readJsonFile, writeJsonFile } = require("../jsonStore");
 const crypto = require("crypto");
+const { requireSupabase, throwIfDatabaseError } = require("../supabase");
 
 const MAX_CLIPBOARD_HISTORY = 50;
 
-function validEntry(entry) {
-  return entry && typeof entry.content === "string" && typeof entry.updatedAt === "string";
+function toEntry(row) {
+  return { id: row.id, content: row.content, updatedAt: row.created_at };
 }
 
-function readClipboardHistory() {
-  const saved = readJsonFile(CLIPBOARD_FILE, []);
-  // Preserve legacy single-value data and assign IDs to history created before deletion support.
-  const rawHistory = Array.isArray(saved) ? saved : validEntry(saved) ? [saved] : [];
-  const history = rawHistory
-    .filter(validEntry)
-    .slice(0, MAX_CLIPBOARD_HISTORY)
-    .map((entry) => ({ ...entry, id: typeof entry.id === "string" && entry.id ? entry.id : crypto.randomUUID() }));
-  const needsMigration = !Array.isArray(saved)
-    ? history.length > 0
-    : history.length !== saved.length || history.some((entry, index) => entry.id !== saved[index]?.id);
-  if (needsMigration) writeJsonFile(CLIPBOARD_FILE, history);
-  return history;
+async function readClipboardHistory() {
+  const { data, error } = await requireSupabase().from("clipboard_history").select("*").order("created_at", { ascending: false }).limit(MAX_CLIPBOARD_HISTORY);
+  throwIfDatabaseError(error, "read clipboard history");
+  return (data || []).map(toEntry);
 }
 
-function readClipboard() {
-  return { history: readClipboardHistory() };
+async function readClipboard() {
+  return { history: await readClipboardHistory() };
 }
 
-function appendClipboard(content) {
-  const history = readClipboardHistory();
+async function appendClipboard(content) {
+  const history = await readClipboardHistory();
   if (history[0]?.content === content) return { history, added: false };
-
-  const nextHistory = [
-    { id: crypto.randomUUID(), content: String(content), updatedAt: new Date().toISOString() },
-    ...history,
-  ].slice(0, MAX_CLIPBOARD_HISTORY);
-  writeJsonFile(CLIPBOARD_FILE, nextHistory);
-  return { history: nextHistory, added: true };
+  const { error } = await requireSupabase().from("clipboard_history").insert({ id: crypto.randomUUID(), content: String(content) });
+  throwIfDatabaseError(error, "append clipboard history");
+  const { data: overflow, error: overflowError } = await requireSupabase().from("clipboard_history").select("id").order("created_at", { ascending: false }).range(MAX_CLIPBOARD_HISTORY, 10000);
+  throwIfDatabaseError(overflowError, "trim clipboard history");
+  for (const entry of overflow || []) {
+    const { error: deleteError } = await requireSupabase().from("clipboard_history").delete().eq("id", entry.id);
+    throwIfDatabaseError(deleteError, "trim clipboard history");
+  }
+  return { history: await readClipboardHistory(), added: true };
 }
 
-function deleteClipboardEntry(id) {
-  const history = readClipboardHistory();
-  const nextHistory = history.filter((entry) => entry.id !== id);
-  if (nextHistory.length === history.length) return { history, removed: false };
-  writeJsonFile(CLIPBOARD_FILE, nextHistory);
-  return { history: nextHistory, removed: true };
+async function deleteClipboardEntry(id) {
+  const { data, error } = await requireSupabase().from("clipboard_history").delete().eq("id", String(id)).select("id");
+  throwIfDatabaseError(error, "delete clipboard history entry");
+  return { history: await readClipboardHistory(), removed: (data || []).length > 0 };
 }
 
-function clearClipboardHistory() {
-  writeJsonFile(CLIPBOARD_FILE, []);
+async function clearClipboardHistory() {
+  const { error } = await requireSupabase().from("clipboard_history").delete().gte("created_at", "1970-01-01T00:00:00.000Z");
+  throwIfDatabaseError(error, "clear clipboard history");
   return { history: [] };
 }
 
