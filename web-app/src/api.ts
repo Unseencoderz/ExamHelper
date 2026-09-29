@@ -121,7 +121,7 @@ export const api = {
     return request('/config', { method: 'PATCH', body: JSON.stringify(config) });
   },
 
-  pushClipboard(content: string): Promise<{ delivered: boolean; history: ClipboardEntry[] }> {
+  pushClipboard(content: string): Promise<{ status: string; delivered: boolean }> {
     return request('/clipboard/push', { method: 'POST', body: JSON.stringify({ content }) });
   },
 

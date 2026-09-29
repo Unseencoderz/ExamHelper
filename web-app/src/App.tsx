@@ -445,7 +445,6 @@ export default function App() {
     try {
       setBusy(true);
       const res = await api.pushClipboard(clipboardPush);
-      setClipboardHistory(res.history);
       setClipboardPush('');
       if (res.delivered) {
         notify('Delivered to desktop clipboard', 'success');

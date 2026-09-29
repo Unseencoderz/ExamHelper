@@ -71,7 +71,7 @@ DEFAULT_CONFIG = {
         "profile": "max_quality_v1",
     },
     "upload": {
-        "endpoint": "http://localhost:3000/upload",
+        "endpoint": "https://microphonev3-backend.onrender.com/upload",
         "device_id": str(uuid.uuid4()),
         "max_queue_size": "100",
         "max_retries": "5",
